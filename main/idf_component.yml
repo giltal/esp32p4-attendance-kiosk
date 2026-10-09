@@ -1,0 +1,17 @@
+dependencies:
+  idf:
+    version: ">=5.5"
+  espressif/esp_lcd_jd9165: "^2.0.2"
+  espressif/esp_lcd_touch_gt911: "*"
+  espressif/esp_lvgl_port: "2.8.0~1"
+  lvgl/lvgl: "9.5.0"
+  espressif/esp_codec_dev: "^1.5"
+  espressif/esp_hosted: "2.12.8"   # 2.12.13 asserts in sdio_mempool_create at boot
+  espressif/esp_wifi_remote: "1.6.0"
+  # Camera (OV02C10 via MIPI-CSI). Same version as Guition's IDF 5.5 camera demo;
+  # esp_cam_sensor 1.2.1 + OV02C10 driver is vendored in components/ (not in the registry).
+  espressif/esp_video: "1.1.0"
+  # Face detection + recognition (ESP-DL). recognition 0.3.2 requires detect ~0.4.1.
+  # Detect: MSR+MNP (~16-28 ms/frame on P4). Feature model: MFN S8 v1 (~93 ms/face). Models in flash rodata.
+  espressif/human_face_detect: "0.4.2"
+  espressif/human_face_recognition: "0.3.2"

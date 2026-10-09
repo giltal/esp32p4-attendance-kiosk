@@ -1,0 +1,12 @@
+# Build output / generated
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+*.tmp
+
+# Vendor documents (copyrighted, download from Guition)
+board_docs/
+
+# Editor
+.vscode/
