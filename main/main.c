@@ -131,6 +131,9 @@ void app_main(void)
         [ESP_RST_SW] = "software restart", [ESP_RST_PANIC] = "CRASH (panic)", [ESP_RST_INT_WDT] = "interrupt watchdog",
         [ESP_RST_TASK_WDT] = "task watchdog", [ESP_RST_WDT] = "other watchdog", [ESP_RST_DEEPSLEEP] = "deep sleep",
         [ESP_RST_BROWNOUT] = "BROWN-OUT (power dip)", [ESP_RST_SDIO] = "SDIO",
+        [ESP_RST_USB] = "USB (flashing / serial monitor)", [ESP_RST_JTAG] = "JTAG",
+        [ESP_RST_EFUSE] = "eFuse error", [ESP_RST_PWR_GLITCH] = "power glitch",
+        [ESP_RST_CPU_LOCKUP] = "CPU lock-up",
     };
     esp_reset_reason_t rr = esp_reset_reason();
     ESP_LOGW(TAG, "Reset reason: %s (%d)",
