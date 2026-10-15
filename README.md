@@ -12,8 +12,10 @@ sensor** (UART). The UI is in Hebrew (right-to-left).
 - **Face recognition at the door** — ESP-DL face detection + face signatures, live camera view on the
   main screen, 3 consecutive matches required, per-student cooldown. Only signatures are stored
   (`faces.bin` on the SD card), never images.
-- **Fingerprint** — driver for ID809-type modules (DFRobot SEN0348 protocol) with auto-detection of
-  baud rate and swapped TX/RX; R503 (Grow) protocol notes and diagnostics included.
+- **Fingerprint** — GROW (R503-style) protocol driver, tested with the **FPM383F** (57600 baud,
+  50 templates): 3-capture enrollment, 2 fingers per student, identification, duplicate check.
+  Auto-detects baud rate and swapped TX/RX; a boot-time protocol scan (GROW / FPM383 / ID809)
+  helps identify unknown modules.
 - **Attendance logic** — automatic IN/OUT toggle with a configurable minimum time between entry and
   exit (default 30 min), automatic check-out at end of day, state survives reboots (today's log is
   replayed at boot).
@@ -30,12 +32,13 @@ sensor** (UART). The UI is in Hebrew (right-to-left).
 |---|---|
 | Guition JC1060P470C_I_W_Y | ESP32-P4 (rev 1.3), 32 MB PSRAM, 16 MB flash, JD9165 LCD, GT911 touch |
 | Camera | OV02C10 on MIPI-CSI (on the board), 1288×728 @ 30 fps |
-| Fingerprint sensor (optional) | 3.3 V UART module; default pins TX=GPIO3, RX=GPIO4 (`main/board_config.h`) |
+| Fingerprint sensor (optional) | FPM383F (or other GROW-protocol module), 3.3 V UART; board TX=GPIO4, RX=GPIO3 (`main/board_config.h`) |
 | microSD card | FAT32 — all data is stored here |
 
-Fingerprint wiring for the module family used here (connector position 1→6, check your module's
-datasheet — clone colour codes differ!): red VCC 3.3 V, black GND, yellow TX → GPIO4,
-green RX ← GPIO3, blue WAKEUP (optional, GPIO5), white 3.3VT → 3.3 V. **Never use 5 V.**
+Fingerprint wiring (expansion header, by **function** — check your module's own pinout, colour codes
+differ between clones): VCC → 3V3, GND → GND, sensor RX ← GPIO4, sensor TX → GPIO3, touch/wake output
+(optional) → GPIO5, touch supply (if present) → 3V3. TX/RX swapped is detected automatically.
+**3.3 V only — never 5 V.** Unknown module? Set `PIN_DIAG 1` in `main/main.c` to run the protocol scan.
 
 ## Build & flash
 
