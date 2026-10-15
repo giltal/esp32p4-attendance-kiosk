@@ -335,16 +335,74 @@ uint8_t fp_sensor_free_id(uint16_t from, uint16_t *out_id)
     return FP_ERR_LIBRARY_FULL;
 }
 
+/*
+ * LED: the FPM383F ignores GROW's AuraLedConfig, so the ring is driven with the
+ * module's native FPM383 command (02 0F) — same wires, different framing:
+ *   F1 1F E2 2E B6 6B A8 8A | len(2, BE) | hdr cksum | pwd(4) | cmd 02 0F |
+ *   mode, colour, p1, p2, p3 | cksum      (cksum = two's complement of the byte sum)
+ * Modes: 0 off, 1 on, 2 auto, 3 breathing (p1 max %, p2 min %, p3 rate),
+ *        4 blink (p1 on x10 ms, p2 off x10 ms, p3 count). Colour bits: 1 G, 2 R, 4 B.
+ */
+static const uint8_t FPM_SYNC[8] = { 0xF1, 0x1F, 0xE2, 0x2E, 0xB6, 0x6B, 0xA8, 0x8A };
+
+static uint8_t fpm_cmd(uint8_t cmd1, uint8_t cmd2, const uint8_t *data, uint8_t len)
+{
+    uint8_t f[32];
+    uint16_t total = 7 + len;                     /* pwd(4) + cmd(2) + data + cksum(1) */
+    memcpy(f, FPM_SYNC, 8);
+    f[8] = total >> 8;
+    f[9] = total & 0xFF;
+    uint8_t s = 0;
+    for (int i = 0; i < 10; i++) s += f[i];
+    f[10] = (uint8_t)(~s + 1);
+    uint8_t *b = &f[11];
+    b[0] = b[1] = b[2] = b[3] = 0;                /* password */
+    b[4] = cmd1;
+    b[5] = cmd2;
+    memcpy(&b[6], data, len);
+    s = 0;
+    for (int i = 0; i < 6 + len; i++) s += b[i];
+    b[6 + len] = (uint8_t)(~s + 1);
+
+    uart_flush_input(FP_UART_NUM);
+    uart_write_bytes(FP_UART_NUM, f, 11 + total);
+
+    /* Reply: sync | len | hdr | pwd | cmd | error(4) ... */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(TIMEOUT_SHORT_MS);
+    uint8_t win[8] = {0}, c;
+    for (;;) {
+        if (!read_exact(&c, 1, deadline)) return FP_ERR_COMM;
+        memmove(win, win + 1, 7);
+        win[7] = c;
+        if (memcmp(win, FPM_SYNC, 8) == 0) break;
+    }
+    uint8_t h[3];
+    if (!read_exact(h, 3, deadline)) return FP_ERR_COMM;
+    uint16_t rlen = (h[0] << 8) | h[1];
+    uint8_t body[32];
+    if (rlen < 11 || rlen > sizeof(body) || !read_exact(body, rlen, deadline)) return FP_ERR_COMM;
+    uint32_t err = ((uint32_t)body[6] << 24) | (body[7] << 16) | (body[8] << 8) | body[9];
+    return err == 0 ? FP_OK : FP_ERR_FAIL;
+}
+
 uint8_t fp_sensor_led(fp_led_mode_t mode, fp_led_color_t color, uint8_t count)
 {
     if (!s_ready) return FP_ERR_COMM;
-    /* GROW AuraLedConfig: ctrl 1 breathing, 2 flashing, 3 on, 4 off, 5 fade in, 6 fade out;
-     * colours 1 red, 2 blue, 3 purple, 4 green, 5 yellow, 6 cyan, 7 white */
-    static const uint8_t ctrl_map[]  = { 0, 1, 2, 3, 4, 5, 6, 2 };     /* SLOW_BLINK -> flashing */
-    static const uint8_t color_map[] = { 0, 4, 1, 5, 2, 6, 3, 7 };     /* our enum -> GROW */
-    uint8_t speed = (mode == FP_LED_FAST_BLINK) ? 0x20 : 0x60;
-    const uint8_t cmd[] = { CMD_AURA_LED, ctrl_map[mode], speed, color_map[color], count };
-    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_SHORT_MS));
+    static const uint8_t color_map[] = { 0, 0x01, 0x02, 0x03, 0x04, 0x06, 0x05, 0x07 };  /* our enum -> G/R/B bits */
+    uint8_t d[5] = { 0, color_map[color], 0, 0, 0 };
+    switch (mode) {
+    case FP_LED_BREATHING:  d[0] = 3; d[2] = 100; d[3] = 0;  d[4] = 50;    break;
+    case FP_LED_FAST_BLINK: d[0] = 4; d[2] = 15;  d[3] = 15; d[4] = count; break;
+    case FP_LED_SLOW_BLINK: d[0] = 4; d[2] = 50;  d[3] = 50; d[4] = count; break;
+    case FP_LED_ON:
+    case FP_LED_FADE_IN:    d[0] = 1; break;
+    case FP_LED_OFF:
+    case FP_LED_FADE_OUT:
+    default:                d[0] = 0; d[1] = 0; break;
+    }
+    uint8_t rc = fpm_cmd(0x02, 0x0F, d, sizeof(d));
+    if (rc != FP_OK) ESP_LOGW(TAG, "LED command (mode %u colour %u): %s", d[0], d[1], fp_sensor_err_str(rc));
+    return rc;
 }
 
 const char *fp_sensor_err_str(uint8_t code)
