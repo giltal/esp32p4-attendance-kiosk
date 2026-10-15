@@ -29,7 +29,7 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 
-#define PIN_DIAG 0   /* 1 = run sensor-line diagnostic (pin_diag.c) at boot */
+#define PIN_DIAG 0   /* 1 = run sensor protocol scan (pin_diag.c) at boot */
 #define CAMERA_SELFTEST 0   /* 1 = headless camera test at boot (opens admin WITHOUT PIN — never ship) */
 #if PIN_DIAG
 #include "pin_diag.h"
@@ -205,8 +205,7 @@ void app_main(void)
     }
 
 #if PIN_DIAG
-    pin_diag_sensor_lines(FP_UART_TX_GPIO, FP_UART_RX_GPIO);   /* TX pad readback + RX edge count */
-    pin_diag_watch(5);                                         /* log sensor WAKEUP (blue) changes */
+    pin_diag_protocol_scan(FP_UART_TX_GPIO, FP_UART_RX_GPIO);  /* which protocol does the sensor speak? */
 #endif
 
     /* Fingerprint sensor service */

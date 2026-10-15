@@ -11,3 +11,6 @@ void pin_diag_sensor_lines(int tx, int rx);
 
 /* Background task logging every level change on `pin`. */
 void pin_diag_watch(int pin);
+
+/* Try GROW/R503, FPM383 and ID809 handshakes at several bauds/pin orders; log raw replies. */
+void pin_diag_protocol_scan(int tx, int rx);

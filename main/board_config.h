@@ -95,7 +95,9 @@
 #define RTC_I2C_ADDR            0x32
 
 /*──────────────────────────────────────────────────────────────────────────────
- *  Fingerprint sensor: driver speaks the ID809 protocol (DFRobot SEN0348 type,
+ *  Fingerprint sensor: FPM383F, GROW protocol @ 57600 (verified 2026-10-15 by a protocol
+ *  scan: answers GROW VfyPwd and FPM383 heartbeat; TX on GPIO4, RX on GPIO3).
+ *  Earlier note: driver used to speak the ID809 protocol (DFRobot SEN0348 type,
  *  115200 baud, AA 55 frames). The first two modules (AliExpress, sold as ID809,
  *  R503-style white housing) never answered — replacements on order.
  *
@@ -114,6 +116,6 @@
  *  All header GPIOs (1-5, 20, 32, 33, 45-47) passed a drive/readback test.
  *────────────────────────────────────────────────────────────────────────────*/
 #define FP_UART_NUM             UART_NUM_1
-#define FP_UART_TX_GPIO         3       /* P4 TX -> sensor RX (black)   */
-#define FP_UART_RX_GPIO         4       /* P4 RX <- sensor TX (yellow)  */
-#define FP_UART_BAUD            115200  /* ID809 factory default */
+#define FP_UART_TX_GPIO         4       /* P4 TX -> sensor RX */
+#define FP_UART_RX_GPIO         3       /* P4 RX <- sensor TX */
+#define FP_UART_BAUD            57600   /* FPM383F (GROW protocol) default */

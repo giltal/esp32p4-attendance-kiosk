@@ -196,6 +196,68 @@ void pin_diag_sensor_lines(int tx, int rx)
     ESP_LOGW(TAG, "===== Sensor line probe done =====");
 }
 
+/* ── Protocol scan: GROW/R503, FPM383 and ID809 handshakes, raw replies ──── */
+
+static const uint8_t PROBE_GROW[] = {      /* VfyPwd(0) */
+    0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x07, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1B
+};
+static const uint8_t PROBE_FPM383[] = {    /* heartbeat 03 03 */
+    0xF1, 0x1F, 0xE2, 0x2E, 0xB6, 0x6B, 0xA8, 0x8A, 0x00, 0x07, 0x86, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0xFA
+};
+static const uint8_t PROBE_ID809[26] = {   /* TEST_CONNECTION */
+    0xAA, 0x55, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, [24] = 0x00, [25] = 0x01
+};
+
+void pin_diag_protocol_scan(int tx, int rx)
+{
+    const uart_config_t cfg = {
+        .baud_rate = 115200, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    static const struct { const char *name; const uint8_t *pkt; int len; } probes[] = {
+        { "GROW/R503", PROBE_GROW,   sizeof(PROBE_GROW) },
+        { "FPM383",    PROBE_FPM383, sizeof(PROBE_FPM383) },
+        { "ID809",     PROBE_ID809,  sizeof(PROBE_ID809) },
+    };
+    static const int bauds[] = { 115200, 57600, 9600, 19200, 38400 };
+    const int pins[2][2] = { { tx, rx }, { rx, tx } };
+
+    ESP_LOGW(TAG, "===== Protocol scan (sensor on GPIO%d/GPIO%d) =====", tx, rx);
+    uart_driver_install(FP_UART_NUM, 512, 0, 0, NULL, 0);
+    uart_param_config(FP_UART_NUM, &cfg);
+    vTaskDelay(pdMS_TO_TICKS(500));                 /* let the module boot */
+
+    int answers = 0;
+    for (int p = 0; p < 2; p++) {
+        gpio_reset_pin(tx);
+        gpio_reset_pin(rx);
+        uart_set_pin(FP_UART_NUM, pins[p][0], pins[p][1], UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        gpio_pullup_en(pins[p][1]);
+        for (int b = 0; b < (int)(sizeof(bauds) / sizeof(bauds[0])); b++) {
+            uart_set_baudrate(FP_UART_NUM, bauds[b]);
+            for (int k = 0; k < 3; k++) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+                uart_flush_input(FP_UART_NUM);
+                uart_write_bytes(FP_UART_NUM, (const char *)probes[k].pkt, probes[k].len);
+                uint8_t buf[64];
+                int n = uart_read_bytes(FP_UART_NUM, buf, sizeof(buf), pdMS_TO_TICKS(400));
+                if (n <= 0) continue;
+                bool echo = n >= probes[k].len && memcmp(buf, probes[k].pkt, probes[k].len) == 0;
+                char hex[3 * 40 + 1] = {0};
+                for (int i = 0; i < n && i < 40; i++) sprintf(hex + i * 3, "%02X ", buf[i]);
+                ESP_LOGW(TAG, "TX=%d RX=%d %6d %-9s -> %d bytes%s: %s", pins[p][0], pins[p][1], bauds[b],
+                         probes[k].name, n, echo ? " (ECHO of our frame)" : "", hex);
+                if (!echo) answers++;
+            }
+        }
+    }
+    uart_driver_delete(FP_UART_NUM);
+    gpio_reset_pin(tx);
+    gpio_reset_pin(rx);
+    ESP_LOGW(TAG, "===== Protocol scan done: %d real answer(s) =====", answers);
+}
+
 /* Log every level change on a pin (e.g. sensor WAKEUP/touch line). */
 static void watch_task(void *arg)
 {

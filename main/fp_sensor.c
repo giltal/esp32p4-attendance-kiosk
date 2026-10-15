@@ -1,3 +1,14 @@
+/*
+ * GROW ("R30x / R503 / ZhianTec") protocol driver — used by the FPM383F
+ * (57600 8N1). The module also answers the FPM383 "F1 1F E2 2E..." protocol,
+ * but GROW maps 1:1 onto the capture / merge / store / search flow used by
+ * fp_service.
+ *
+ * Packet: EF 01 | addr(4) | PID | LEN(2, BE, payload+2) | payload | SUM(2, BE)
+ *         SUM = PID + LEN bytes + payload bytes. ACK PID = 0x07, payload[0] = code.
+ *
+ * Library IDs: fp_service uses 1..capacity-1 (page 0 is never used).
+ */
 #include "fp_sensor.h"
 #include "board_config.h"
 #include "driver/uart.h"
@@ -10,59 +21,65 @@
 
 static const char *TAG = "FP_SENSOR";
 
-/* Frame types */
-#define FRAME_RSP   0       /* response:      AA 55 */
-#define FRAME_DATA  1       /* data response: A5 5A */
+#define PID_COMMAND   0x01
+#define PID_ACK       0x07
+#define ADDRESS       0xFFFFFFFFu
 
-/* Commands (subset of DFRobot_ID809) */
-#define CMD_TEST_CONNECTION      0x0001
-#define CMD_DEVICE_INFO          0x0004
-#define CMD_GET_IMAGE            0x0020
-#define CMD_FINGER_DETECT        0x0021
-#define CMD_SLED_CTRL            0x0024
-#define CMD_STORE_CHAR           0x0040
-#define CMD_DEL_CHAR             0x0044
-#define CMD_GET_EMPTY_ID         0x0045
-#define CMD_GET_ENROLL_COUNT     0x0048
-#define CMD_GET_ENROLLED_ID_LIST 0x0049
-#define CMD_GENERATE             0x0060
-#define CMD_MERGE                0x0061
-#define CMD_SEARCH               0x0063
+/* GROW instruction codes */
+#define CMD_GEN_IMG        0x01
+#define CMD_IMG2TZ         0x02
+#define CMD_SEARCH         0x04
+#define CMD_REG_MODEL      0x05
+#define CMD_STORE          0x06
+#define CMD_DELETE         0x0C
+#define CMD_EMPTY          0x0D
+#define CMD_READ_SYS_PARA  0x0F
+#define CMD_VERIFY_PWD     0x13
+#define CMD_TEMPLATE_NUM   0x1D
+#define CMD_READ_INDEX     0x1F
+#define CMD_AURA_LED       0x35
 
-#define FRAME_LEN        26
-#define FRAME_DATA_LEN   16     /* command data field (zero-padded) */
-#define RSP_DATA_LEN     14     /* response data field */
-#define MAX_DATA_PKT     256
+/* GROW confirmation codes */
+#define G_OK               0x00
+#define G_NO_FINGER        0x02
+#define G_IMAGE_FAIL       0x03
+#define G_IMAGE_MESSY      0x06
+#define G_FEATURE_FAIL     0x07
+#define G_NOT_FOUND        0x09
+#define G_MERGE_FAIL       0x0A
+#define G_BAD_LOCATION     0x0B
+#define G_FLASH_ERR        0x18
 
-#define TIMEOUT_SHORT_MS 500
-#define TIMEOUT_LONG_MS  2500   /* capture / search / merge / store / delete */
+#define MAX_PAYLOAD        64
+#define TIMEOUT_SHORT_MS   600
+#define TIMEOUT_LONG_MS    2500
 
 static bool s_ready = false;
-static uint16_t s_capacity = 80;
+static uint16_t s_capacity = 50;
 
 /* Pin/baud actually in use (auto-detected; may differ from board_config.h) */
 static int s_tx_gpio = FP_UART_TX_GPIO;
 static int s_rx_gpio = FP_UART_RX_GPIO;
 static int s_baud    = FP_UART_BAUD;
 
-/* ── Frame I/O ──────────────────────────────────────────────────────────── */
+/* ── Packet I/O ─────────────────────────────────────────────────────────── */
 
-static void send_cmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+static void send_packet(const uint8_t *data, uint16_t len)
 {
-    uint8_t f[FRAME_LEN] = {0};
-    f[0] = 0xAA; f[1] = 0x55;          /* prefix */
-    f[2] = 0;    f[3] = 0;             /* SID, DID */
-    f[4] = cmd & 0xFF; f[5] = cmd >> 8;
-    f[6] = len & 0xFF; f[7] = len >> 8;
-    if (len) memcpy(&f[8], data, len > FRAME_DATA_LEN ? FRAME_DATA_LEN : len);
-
-    uint16_t cks = 0;                  /* sum of every byte before the checksum */
-    for (int i = 0; i < 8 + FRAME_DATA_LEN; i++) cks += f[i];
-    f[24] = cks & 0xFF; f[25] = cks >> 8;
+    uint8_t pkt[9 + MAX_PAYLOAD + 2];
+    uint16_t plen = len + 2;
+    pkt[0] = 0xEF; pkt[1] = 0x01;
+    pkt[2] = ADDRESS >> 24; pkt[3] = ADDRESS >> 16; pkt[4] = ADDRESS >> 8; pkt[5] = ADDRESS;
+    pkt[6] = PID_COMMAND;
+    pkt[7] = plen >> 8; pkt[8] = plen & 0xFF;
+    memcpy(&pkt[9], data, len);
+    uint16_t sum = PID_COMMAND + (plen >> 8) + (plen & 0xFF);
+    for (int i = 0; i < len; i++) sum += data[i];
+    pkt[9 + len] = sum >> 8;
+    pkt[10 + len] = sum & 0xFF;
 
     uart_flush_input(FP_UART_NUM);
-    vTaskDelay(pdMS_TO_TICKS(5));      /* the module wants a short gap between frames */
-    uart_write_bytes(FP_UART_NUM, f, sizeof(f));
+    uart_write_bytes(FP_UART_NUM, pkt, 11 + len);
 }
 
 static bool read_exact(uint8_t *buf, int len, TickType_t deadline)
@@ -78,116 +95,88 @@ static bool read_exact(uint8_t *buf, int len, TickType_t deadline)
     return true;
 }
 
-/*
- * Receive one response (AA 55) or data response (A5 5A) frame.
- * Returns FRAME_RSP / FRAME_DATA, or -1 on timeout / bad frame.
- * *ret = module result code; data = payload (data_len bytes).
- */
-static int recv_frame(uint8_t *ret, uint8_t *data, int max, int *data_len, int timeout_ms)
+/* Receive an ACK packet; returns payload length (payload[0] = code) or -1. */
+static int recv_ack(uint8_t *payload, int max_len, int timeout_ms)
 {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
-    uint8_t b, prev = 0;
-    int type = -1;
+    for (;;) {
+        uint8_t b, prev = 0;
+        for (;;) {                                   /* hunt for EF 01 */
+            if (!read_exact(&b, 1, deadline)) return -1;
+            if (prev == 0xEF && b == 0x01) break;
+            prev = b;
+        }
+        uint8_t hdr[7];                              /* addr(4) pid len(2) */
+        if (!read_exact(hdr, sizeof(hdr), deadline)) return -1;
+        uint8_t pid = hdr[4];
+        uint16_t plen = (hdr[5] << 8) | hdr[6];
+        if (plen < 3 || plen > MAX_PAYLOAD + 2) return -1;
+        uint8_t body[MAX_PAYLOAD + 2];
+        if (!read_exact(body, plen, deadline)) return -1;
+        if (pid == PID_COMMAND) continue;            /* our own frame echoed back — skip */
+        if (pid != PID_ACK) return -1;
 
-    while (type < 0) {
-        if (!read_exact(&b, 1, deadline)) return -1;
-        if (prev == 0xAA && b == 0x55)      type = FRAME_RSP;
-        else if (prev == 0xA5 && b == 0x5A) type = FRAME_DATA;
-        prev = b;
+        uint16_t sum = pid + (plen >> 8) + (plen & 0xFF);
+        for (int i = 0; i < plen - 2; i++) sum += body[i];
+        if (sum != ((body[plen - 2] << 8) | body[plen - 1])) {
+            ESP_LOGW(TAG, "checksum mismatch");
+            return -1;
+        }
+        int n = plen - 2 < max_len ? plen - 2 : max_len;
+        memcpy(payload, body, n);
+        return n;
     }
-
-    uint8_t h[8];   /* SID DID RCM(2) LEN(2) RET(2) */
-    if (!read_exact(h, sizeof(h), deadline)) return -1;
-    uint16_t len = h[4] | (h[5] << 8);
-    if (len < 2) return -1;
-
-    /* Response frames have a fixed 14-byte data field; data frames carry LEN-2 bytes */
-    int field = (type == FRAME_RSP) ? RSP_DATA_LEN : len - 2;
-    int payload = len - 2;
-    if (field > MAX_DATA_PKT || payload > field) return -1;
-
-    uint8_t body[MAX_DATA_PKT + 2];
-    if (!read_exact(body, field + 2, deadline)) return -1;
-
-    uint16_t cks = (type == FRAME_RSP) ? (0xAA + 0x55) : (0xA5 + 0x5A);
-    for (int i = 0; i < 8; i++) cks += h[i];
-    for (int i = 0; i < payload; i++) cks += body[i];
-    uint16_t rx_cks = body[field] | (body[field + 1] << 8);
-    if (cks != rx_cks) {
-        ESP_LOGW(TAG, "checksum mismatch (got %04X, want %04X)", rx_cks, cks);
-        return -1;
-    }
-
-    *ret = h[6];
-    int n = payload < max ? payload : max;
-    if (data && n > 0) memcpy(data, body, n);
-    if (data_len) *data_len = n;
-    return type;
 }
 
-/* Send a command and return the module's result code; optional reply data. */
-static uint8_t transact(uint16_t cmd, const uint8_t *data, uint16_t len,
-                        uint8_t *reply, int reply_max, int timeout_ms)
+/* Send a command; returns the GROW confirmation code (0xFF = no reply). */
+static uint8_t transact(const uint8_t *cmd, uint16_t len, uint8_t *reply, int reply_len, int timeout_ms)
 {
-    uint8_t ret;
-    uint8_t buf[RSP_DATA_LEN];
-    int n = 0;
-    send_cmd(cmd, data, len);
-    if (recv_frame(&ret, buf, sizeof(buf), &n, timeout_ms) != FRAME_RSP) return FP_ERR_COMM;
-    if (reply && reply_max > 0) {
-        memset(reply, 0, reply_max);
-        memcpy(reply, buf, n < reply_max ? n : reply_max);
+    uint8_t ack[MAX_PAYLOAD];
+    send_packet(cmd, len);
+    int n = recv_ack(ack, sizeof(ack), timeout_ms);
+    if (n < 1) return 0xFF;
+    if (reply && reply_len > 0) {
+        memset(reply, 0, reply_len);
+        memcpy(reply, &ack[1], (n - 1) < reply_len ? (n - 1) : reply_len);
     }
-    return ret;
+    return ack[0];
 }
 
-/* Commands answered by a response (with the length) followed by a data frame. */
-static uint8_t transact_data(uint16_t cmd, uint8_t *out, int max, int *out_len)
+/* GROW confirmation code -> driver result code (fp_sensor.h) */
+static uint8_t map_code(uint8_t g)
 {
-    uint8_t ret;
-    uint8_t buf[RSP_DATA_LEN];
-    send_cmd(cmd, NULL, 0);
-    if (recv_frame(&ret, buf, sizeof(buf), NULL, TIMEOUT_SHORT_MS) != FRAME_RSP) return FP_ERR_COMM;
-    if (ret != FP_OK) return ret;
-    if (recv_frame(&ret, out, max, out_len, TIMEOUT_SHORT_MS) != FRAME_DATA) return FP_ERR_COMM;
-    return ret;
+    switch (g) {
+    case G_OK:            return FP_OK;
+    case G_NO_FINGER:     return FP_ERR_NO_FINGER;
+    case G_IMAGE_FAIL:
+    case G_IMAGE_MESSY:
+    case G_FEATURE_FAIL:  return FP_ERR_BAD_QUALITY;
+    case G_NOT_FOUND:     return FP_ERR_NO_MATCH;
+    case G_MERGE_FAIL:    return FP_ERR_MERGE_FAIL;
+    case G_BAD_LOCATION:  return FP_ERR_INVALID_PARAM;
+    case 0xFF:            return FP_ERR_COMM;
+    default:              return FP_ERR_FAIL;
+    }
 }
-
-static void put16(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = v >> 8; }
-static uint16_t get16(const uint8_t *p)  { return p[0] | (p[1] << 8); }
 
 /* ── Link setup / auto-detect ───────────────────────────────────────────── */
 
 static void uart_apply(int tx, int rx, int baud)
 {
-    /* Detach the previous pins first so a swapped TX can't keep driving the new RX */
     gpio_reset_pin(s_tx_gpio);
     gpio_reset_pin(s_rx_gpio);
     uart_set_baudrate(FP_UART_NUM, baud);
     uart_set_pin(FP_UART_NUM, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    gpio_pullup_en(rx);   /* keep RX idle-high when unplugged */
+    gpio_pullup_en(rx);
     s_tx_gpio = tx;
     s_rx_gpio = rx;
     s_baud = baud;
 }
 
-static bool test_connection(void)
+static bool handshake(void)
 {
-    return transact(CMD_TEST_CONNECTION, NULL, 0, NULL, 0, 300) == FP_OK;
-}
-
-static void read_device_info(void)
-{
-    uint8_t info[64] = {0};
-    int n = 0;
-    if (transact_data(CMD_DEVICE_INFO, info, sizeof(info) - 1, &n) == FP_OK && n > 0) {
-        info[n] = '\0';
-        int last = (int)strnlen((char *)info, n) - 1;
-        s_capacity = (last >= 0 && info[last] == '3') ? 200 : 80;   /* per DFRobot library */
-        ESP_LOGI(TAG, "Device: '%s' -> capacity %u", (char *)info, s_capacity);
-    } else {
-        ESP_LOGW(TAG, "Device info unavailable — assuming capacity %u", s_capacity);
-    }
+    const uint8_t cmd[] = { CMD_VERIFY_PWD, 0, 0, 0, 0 };
+    return transact(cmd, sizeof(cmd), NULL, 0, 300) == G_OK;
 }
 
 esp_err_t fp_sensor_init(void)
@@ -195,35 +184,28 @@ esp_err_t fp_sensor_init(void)
     s_ready = false;
     if (!uart_is_driver_installed(FP_UART_NUM)) {
         const uart_config_t cfg = {
-            .baud_rate  = FP_UART_BAUD,
-            .data_bits  = UART_DATA_8_BITS,
-            .parity     = UART_PARITY_DISABLE,
-            .stop_bits  = UART_STOP_BITS_1,
-            .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+            .baud_rate = FP_UART_BAUD, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
             .source_clk = UART_SCLK_DEFAULT,
         };
-        ESP_RETURN_ON_ERROR(uart_driver_install(FP_UART_NUM, 1024, 0, 0, NULL, 0),
-                            TAG, "uart install");
+        ESP_RETURN_ON_ERROR(uart_driver_install(FP_UART_NUM, 512, 0, 0, NULL, 0), TAG, "uart install");
         ESP_RETURN_ON_ERROR(uart_param_config(FP_UART_NUM, &cfg), TAG, "uart config");
         uart_apply(FP_UART_TX_GPIO, FP_UART_RX_GPIO, FP_UART_BAUD);
         vTaskDelay(pdMS_TO_TICKS(300));   /* module boot time */
     }
 
-    /* Fast path: last known-good (or configured) settings */
-    bool found = test_connection() || test_connection();
-
-    /* Auto-detect: both wire orders x supported baud rates */
+    bool found = handshake() || handshake();
     if (!found) {
-        static const int bauds[] = { 115200, 57600, 9600, 19200, 38400 };
+        static const int bauds[] = { 57600, 115200, 9600, 19200, 38400 };
         const int pins[2][2] = { { FP_UART_TX_GPIO, FP_UART_RX_GPIO },
                                  { FP_UART_RX_GPIO, FP_UART_TX_GPIO } };
         for (int p = 0; p < 2 && !found; p++) {
             for (int b = 0; b < (int)(sizeof(bauds) / sizeof(bauds[0])) && !found; b++) {
                 uart_apply(pins[p][0], pins[p][1], bauds[b]);
                 vTaskDelay(pdMS_TO_TICKS(20));
-                found = test_connection();
-                ESP_LOGI(TAG, "probe TX=%d RX=%d %6d baud: %s",
-                         pins[p][0], pins[p][1], bauds[b], found ? "OK" : "no reply");
+                found = handshake();
+                ESP_LOGI(TAG, "probe TX=%d RX=%d %6d baud: %s", pins[p][0], pins[p][1], bauds[b],
+                         found ? "OK" : "no reply");
             }
         }
         if (!found) {
@@ -237,8 +219,17 @@ esp_err_t fp_sensor_init(void)
         }
     }
 
-    ESP_LOGI(TAG, "Sensor connected (TX=GPIO%d RX=GPIO%d %d baud)", s_tx_gpio, s_rx_gpio, s_baud);
-    read_device_info();
+    uint8_t r[16];
+    const uint8_t cmd[] = { CMD_READ_SYS_PARA };
+    if (transact(cmd, sizeof(cmd), r, sizeof(r), TIMEOUT_SHORT_MS) == G_OK) {
+        uint16_t cap = (r[4] << 8) | r[5];
+        if (cap > 0 && cap <= 1000) s_capacity = cap;
+        ESP_LOGI(TAG, "Sensor connected (TX=GPIO%d RX=GPIO%d %d baud), capacity %u, security %u",
+                 s_tx_gpio, s_rx_gpio, s_baud, s_capacity, (r[6] << 8) | r[7]);
+    } else {
+        ESP_LOGI(TAG, "Sensor connected (TX=GPIO%d RX=GPIO%d %d baud), capacity unknown -> %u",
+                 s_tx_gpio, s_rx_gpio, s_baud, s_capacity);
+    }
     s_ready = true;
     return ESP_OK;
 }
@@ -252,102 +243,108 @@ uint16_t fp_sensor_capacity(void)
 
 uint8_t fp_sensor_finger_present(bool *present)
 {
-    uint8_t r[2];
-    uint8_t rc = transact(CMD_FINGER_DETECT, NULL, 0, r, sizeof(r), TIMEOUT_SHORT_MS);
-    if (present) *present = (rc == FP_OK && r[0] != 0);
-    return rc;
+    /* GROW has no "detect" command: GenImg returns NO_FINGER when nothing is there */
+    const uint8_t cmd[] = { CMD_GEN_IMG };
+    uint8_t g = transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_SHORT_MS);
+    if (present) *present = (g == G_OK);
+    return (g == G_OK || g == G_NO_FINGER) ? FP_OK : map_code(g);
 }
 
 uint8_t fp_sensor_capture(void)
 {
-    return transact(CMD_GET_IMAGE, NULL, 0, NULL, 0, TIMEOUT_LONG_MS);
+    const uint8_t cmd[] = { CMD_GEN_IMG };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
 }
 
 uint8_t fp_sensor_generate(uint8_t ram_buf)
 {
-    uint8_t d[2];
-    put16(d, ram_buf);
-    return transact(CMD_GENERATE, d, sizeof(d), NULL, 0, TIMEOUT_LONG_MS);
+    /* GROW char buffers are 1 and 2; RegModel merges those two. Capture 0 goes
+     * to buffer 1, later captures to buffer 2 (the last one wins). */
+    const uint8_t cmd[] = { CMD_IMG2TZ, (uint8_t)(ram_buf == 0 ? 1 : 2) };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
 }
 
 uint8_t fp_sensor_merge(uint8_t count)
 {
-    uint8_t d[3] = { 0, 0, count };   /* result into RAM buffer 0 */
-    return transact(CMD_MERGE, d, sizeof(d), NULL, 0, TIMEOUT_LONG_MS);
+    const uint8_t cmd[] = { CMD_REG_MODEL };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
 }
 
 uint8_t fp_sensor_store(uint16_t id)
 {
-    uint8_t d[4];
-    put16(&d[0], id);
-    put16(&d[2], 0);    /* from RAM buffer 0 */
-    return transact(CMD_STORE_CHAR, d, sizeof(d), NULL, 0, TIMEOUT_LONG_MS);
+    const uint8_t cmd[] = { CMD_STORE, 1, (uint8_t)(id >> 8), (uint8_t)id };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
 }
 
 uint8_t fp_sensor_search(uint16_t *out_id)
 {
-    uint8_t d[6], r[2];
-    put16(&d[0], 0);            /* RAM buffer 0 */
-    put16(&d[2], 1);            /* first ID */
-    put16(&d[4], s_capacity);   /* last ID */
-    uint8_t rc = transact(CMD_SEARCH, d, sizeof(d), r, sizeof(r), TIMEOUT_LONG_MS);
-    if (rc == FP_OK && out_id) *out_id = get16(r);
-    return rc;
+    const uint8_t cmd[] = { CMD_SEARCH, 1, 0, 0, (uint8_t)(s_capacity >> 8), (uint8_t)s_capacity };
+    uint8_t r[4];
+    uint8_t g = transact(cmd, sizeof(cmd), r, sizeof(r), TIMEOUT_LONG_MS);
+    if (g == G_OK && out_id) *out_id = (r[0] << 8) | r[1];
+    if (g == G_OK) ESP_LOGD(TAG, "search: id %u score %u", (r[0] << 8) | r[1], (r[2] << 8) | r[3]);
+    return map_code(g);
 }
 
 uint8_t fp_sensor_delete(uint16_t first, uint16_t last)
 {
-    uint8_t d[4];
-    put16(&d[0], first);
-    put16(&d[2], last);
-    return transact(CMD_DEL_CHAR, d, sizeof(d), NULL, 0, TIMEOUT_LONG_MS);
+    uint16_t n = last >= first ? last - first + 1 : 1;
+    if (first == 1 && last >= s_capacity) {            /* whole library */
+        const uint8_t cmd[] = { CMD_EMPTY };
+        return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
+    }
+    const uint8_t cmd[] = { CMD_DELETE, (uint8_t)(first >> 8), (uint8_t)first, (uint8_t)(n >> 8), (uint8_t)n };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_LONG_MS));
 }
 
 uint8_t fp_sensor_template_count(uint16_t *out_count)
 {
-    uint8_t d[4], r[2];
-    put16(&d[0], 1);
-    put16(&d[2], s_capacity);
-    uint8_t rc = transact(CMD_GET_ENROLL_COUNT, d, sizeof(d), r, sizeof(r), TIMEOUT_SHORT_MS);
-    if (rc == FP_ERR_LIBRARY_EMPTY) {   /* "no templates" is reported as an error */
-        r[0] = r[1] = 0;
-        rc = FP_OK;
-    }
-    if (out_count) *out_count = (rc == FP_OK) ? get16(r) : 0;
-    return rc;
-}
-
-uint8_t fp_sensor_free_id(uint16_t from, uint16_t *out_id)
-{
-    uint8_t d[4], r[2];
-    put16(&d[0], from);
-    put16(&d[2], s_capacity);
-    uint8_t rc = transact(CMD_GET_EMPTY_ID, d, sizeof(d), r, sizeof(r), TIMEOUT_SHORT_MS);
-    if (rc == FP_OK && out_id) *out_id = get16(r);
-    return rc;
+    const uint8_t cmd[] = { CMD_TEMPLATE_NUM };
+    uint8_t r[2];
+    uint8_t g = transact(cmd, sizeof(cmd), r, sizeof(r), TIMEOUT_SHORT_MS);
+    if (out_count) *out_count = (g == G_OK) ? ((r[0] << 8) | r[1]) : 0;
+    return map_code(g);
 }
 
 uint8_t fp_sensor_enrolled_bitmap(uint8_t *bitmap, int max_bytes, int *out_len)
 {
-    return transact_data(CMD_GET_ENROLLED_ID_LIST, bitmap, max_bytes, out_len);
+    int len = 0;
+    memset(bitmap, 0, max_bytes);
+    for (int page = 0; page * 256 < s_capacity && len + 32 <= max_bytes; page++) {
+        const uint8_t cmd[] = { CMD_READ_INDEX, (uint8_t)page };
+        uint8_t g = transact(cmd, sizeof(cmd), bitmap + len, 32, TIMEOUT_SHORT_MS);
+        if (g != G_OK) return map_code(g);
+        len += 32;
+    }
+    if (out_len) *out_len = len;
+    return FP_OK;
+}
+
+uint8_t fp_sensor_free_id(uint16_t from, uint16_t *out_id)
+{
+    uint8_t bm[128];
+    int len = 0;
+    uint8_t rc = fp_sensor_enrolled_bitmap(bm, sizeof(bm), &len);
+    if (rc != FP_OK) return rc;
+    for (int id = from; id < s_capacity && id < len * 8; id++) {
+        if (!(bm[id / 8] & (1 << (id % 8)))) {
+            if (out_id) *out_id = id;
+            return FP_OK;
+        }
+    }
+    return FP_ERR_LIBRARY_FULL;
 }
 
 uint8_t fp_sensor_led(fp_led_mode_t mode, fp_led_color_t color, uint8_t count)
 {
     if (!s_ready) return FP_ERR_COMM;
-    uint8_t d[4];
-    if (s_capacity == 80) {
-        d[0] = mode;
-        d[1] = d[2] = color;
-    } else {
-        /* 200-template variant uses different codes (per DFRobot library) */
-        static const uint8_t mode_map[]  = { 0, 2, 4, 1, 0, 3, 3, 4 };
-        static const uint8_t color_map[] = { 0, 0x84, 0x82, 0x86, 0x81, 0x85, 0x83, 0x87 };
-        d[0] = mode_map[mode];
-        d[1] = d[2] = color_map[color];
-    }
-    d[3] = count;
-    return transact(CMD_SLED_CTRL, d, sizeof(d), NULL, 0, TIMEOUT_SHORT_MS);
+    /* GROW AuraLedConfig: ctrl 1 breathing, 2 flashing, 3 on, 4 off, 5 fade in, 6 fade out;
+     * colours 1 red, 2 blue, 3 purple, 4 green, 5 yellow, 6 cyan, 7 white */
+    static const uint8_t ctrl_map[]  = { 0, 1, 2, 3, 4, 5, 6, 2 };     /* SLOW_BLINK -> flashing */
+    static const uint8_t color_map[] = { 0, 4, 1, 5, 2, 6, 3, 7 };     /* our enum -> GROW */
+    uint8_t speed = (mode == FP_LED_FAST_BLINK) ? 0x20 : 0x60;
+    const uint8_t cmd[] = { CMD_AURA_LED, ctrl_map[mode], speed, color_map[color], count };
+    return map_code(transact(cmd, sizeof(cmd), NULL, 0, TIMEOUT_SHORT_MS));
 }
 
 const char *fp_sensor_err_str(uint8_t code)

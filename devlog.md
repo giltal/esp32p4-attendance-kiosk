@@ -192,3 +192,14 @@ idf.py -p COM11 flash monitor
   recognised the user while passing/working near the screen (IN/OUT flips 10:09, 10:11, 10:12 with the old 60 s gap).
   Fixes: 30 min gap, MIN_FACE_W 60 -> 80 px (work image; ~160 px full frame), face width logged per recognition.
 - Boot now logs every replayed event of today (`ATTENDANCE:   replay HH:MM:SS #id DIR name`).
+
+### 2026-10-15 — Fingerprint working: FPM383F ✅
+- New sensor **FPM383F**. Protocol scan (`pin_diag_protocol_scan`, PIN_DIAG=1) tried GROW/R503, FPM383 and ID809
+  handshakes at 5 bauds x 2 pin orders: it answers **GROW VfyPwd and the FPM383 heartbeat at 57600** (not the
+  115200 printed on the listing), with the board's TX on GPIO4 and RX on GPIO3.
+- `fp_sensor.c` reimplemented on the **GROW protocol** behind the same API (ID809 version is in git history):
+  finger-present = GenImg (no-finger code), 3 captures -> char buffers 1,2,2 -> RegModel -> Store; Search over the
+  library; Empty for "wipe all"; ReadIndexTable for free IDs / orphan cleanup; AuraLedConfig for the ring
+  (may be ignored by this module). Capacity read from ReadSysPara: 50, security level 3.
+- Live test: 2 fingers enrolled (IDs 1, 2), match -> IN, repeats inside the 30 min gap reported correctly.
+  Occasional "poor image quality — retry" during enrollment captures is normal.

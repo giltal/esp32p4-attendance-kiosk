@@ -1,13 +1,13 @@
 #pragma once
 
 /*
- * Driver for ID809-based capacitive fingerprint modules (DFRobot SEN0348 and
- * clones: round 21 mm sensor, breathing RGB ring, 80 templates).
- * Protocol taken from DFRobot's official library (github.com/DFRobot/DFRobot_ID809):
- * 115200 8N1, fixed 26-byte command/response frames, prefix AA 55, little-endian.
+ * Fingerprint sensor driver, GROW (R30x/R503/ZhianTec) protocol — used by the
+ * FPM383F module (57600 8N1; it also speaks the FPM383 "F1 1F E2 2E" protocol).
+ * See fp_sensor.c for the packet format. The interface is protocol-neutral
+ * (an ID809 implementation existed before — see git history).
  *
- * Template IDs are 1..capacity. All functions are blocking and NOT thread-safe —
- * call them from a single task (fp_service owns the sensor).
+ * Template IDs used by fp_service: 1..capacity-1. All functions are blocking
+ * and NOT thread-safe — call them from a single task (fp_service owns the sensor).
  */
 
 #include "esp_err.h"
