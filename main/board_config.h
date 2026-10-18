@@ -6,7 +6,7 @@
  * App:   Fingerprint attendance (student entry/exit) system
  ******************************************************************************/
 
-#define APP_VERSION "0.1.0"
+#define APP_VERSION "0.2.0"
 
 /* Feature flags — set to 0 to disable a peripheral */
 #define ENABLE_DISPLAY      1

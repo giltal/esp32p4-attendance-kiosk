@@ -3,6 +3,7 @@
 #include "camera.h"
 #include "face_detect.h"
 #include "ui_admin.h"
+#include "settings_store.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -33,7 +34,7 @@ static size_t s_out_size;
 static int s_back;
 static int64_t s_last_us;
 static volatile uint32_t s_shown;
-static bool s_mirror = true;
+static bool s_mirror;              /* = settings cam_mirror, loaded when the tab is built */
 
 /* Face detection overlay */
 #define MAX_FACES  4
@@ -195,9 +196,13 @@ static void toggle_cb(lv_event_t *e)
     preview_start();
 }
 
+/* Flips both this preview and the live view on the main screen; saved to config.txt */
 static void mirror_cb(lv_event_t *e)
 {
-    s_mirror = !s_mirror;
+    app_settings_t *s = settings_get();
+    s->cam_mirror = !s->cam_mirror;
+    s_mirror = s->cam_mirror;
+    settings_save(s);
 }
 
 static void detect_cb(lv_event_t *e)
@@ -209,6 +214,7 @@ static void detect_cb(lv_event_t *e)
 void ui_camera_build_tab(lv_obj_t *page)
 {
     lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    s_mirror = settings_get()->cam_mirror;
 
     lv_obj_t *col = ui_box(page, 170, LV_PCT(100));
     ui_align(col, LV_ALIGN_TOP_RIGHT, 0, 0);

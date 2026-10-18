@@ -10,3 +10,6 @@ board_docs/
 
 # Editor
 .vscode/
+
+# Local MCP servers (Fusion 360 on this PC)
+.mcp.json

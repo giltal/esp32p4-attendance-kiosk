@@ -22,6 +22,7 @@ static const app_settings_t s_defaults = {
     .min_scan_gap_s = 30 * 60,
     .volume         = 60,
     .face_enabled   = true,
+    .cam_mirror     = false,
 };
 
 static void copy_str(char *dst, size_t size, const char *src)
@@ -60,6 +61,7 @@ void settings_load(app_settings_t *s)
         else if (strcmp(key, "inout_gap") == 0)     s->min_scan_gap_s = atoi(val);   /* old "scan_gap" ignored: new default */
         else if (strcmp(key, "volume") == 0)        s->volume = atoi(val);
         else if (strcmp(key, "face") == 0)          s->face_enabled = (atoi(val) != 0);
+        else if (strcmp(key, "mirror") == 0)        s->cam_mirror = (atoi(val) != 0);
     }
     fclose(f);
 
@@ -89,6 +91,7 @@ void settings_save(const app_settings_t *s)
     fprintf(f, "inout_gap=%d\n", s->min_scan_gap_s);
     fprintf(f, "volume=%d\n", s->volume);
     fprintf(f, "face=%d\n", s->face_enabled ? 1 : 0);
+    fprintf(f, "mirror=%d\n", s->cam_mirror ? 1 : 0);
 
     int flush_ret = fflush(f);
     int close_ret = fclose(f);

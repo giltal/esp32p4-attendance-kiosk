@@ -6,6 +6,7 @@
 #include "attendance.h"
 #include "student_db.h"
 #include "bsp_audio.h"
+#include "settings_store.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -107,11 +108,15 @@ static esp_err_t scale(const uint8_t *src, int w, int h, uint8_t *dst, size_t ds
     return ppa_do_scale_rotate_mirror(s_ppa, &op);
 }
 
-/* Draw a 2-px rectangle into the (mirrored) view for a box in work coordinates. */
-static void draw_box(uint16_t *view, const face_box_t *f, uint16_t color)
+/* Draw a 2-px rectangle into the view (mirrored or not) for a box in work coordinates. */
+static void draw_box(uint16_t *view, const face_box_t *f, uint16_t color, bool mirror)
 {
     const float k = VIEW_SCALE / WORK_SCALE;   /* work -> view */
-    int x0 = FACE_VIEW_W - 1 - (int)(f->x1 * k), x1 = FACE_VIEW_W - 1 - (int)(f->x0 * k);
+    int x0 = (int)(f->x0 * k), x1 = (int)(f->x1 * k);
+    if (mirror) {
+        x0 = FACE_VIEW_W - 1 - (int)(f->x1 * k);
+        x1 = FACE_VIEW_W - 1 - (int)(f->x0 * k);
+    }
     int y0 = (int)(f->y0 * k), y1 = (int)(f->y1 * k);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -314,8 +319,9 @@ static void frame_cb(const uint8_t *rgb565, int w, int h, void *user)
     if (w * WORK_SCALE > WORK_W || h * WORK_SCALE > WORK_H) return;
 
     if (scale(rgb565, w, h, s_work, s_work_size, WORK_W, WORK_H, WORK_SCALE, false) != ESP_OK) return;
+    const bool mirror = settings_get()->cam_mirror;   /* "היפוך מראה" in the camera tab */
     if (scale(rgb565, w, h, s_view[s_view_back], s_view_size, FACE_VIEW_W, FACE_VIEW_H,
-              VIEW_SCALE, true) != ESP_OK) return;
+              VIEW_SCALE, mirror) != ESP_OK) return;
 
     face_box_t faces[MAX_FACES];
     int n = face_detect_run(s_work, WORK_W, WORK_H, faces, MAX_FACES, NULL);
@@ -324,7 +330,7 @@ static void frame_cb(const uint8_t *rgb565, int w, int h, void *user)
     uint16_t color = (s_mode == MODE_ENROLL) ? enroll_process(faces, n, now)
                                              : kiosk_process(faces, n, now);
     int bi = largest_face(faces, n);
-    if (bi >= 0) draw_box((uint16_t *)s_view[s_view_back], &faces[bi], color);
+    if (bi >= 0) draw_box((uint16_t *)s_view[s_view_back], &faces[bi], color, mirror);
     show_view();
 }
 

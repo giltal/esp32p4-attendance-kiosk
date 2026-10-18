@@ -17,6 +17,7 @@ typedef struct {
     int  min_scan_gap_s;     /* Min. time between a student's IN and OUT (s); repeats inside it are ignored */
     int  volume;             /* Beep volume 0-100 */
     bool face_enabled;       /* Face recognition at the door (camera) */
+    bool cam_mirror;         /* Camera views shown mirrored (selfie); toggled by "היפוך מראה" */
 } app_settings_t;
 
 /* Load settings from /sd/config.txt. Returns defaults if file missing. */
