@@ -16,6 +16,7 @@ static const char *TAG = "REPORT";
 #define UTF8_BOM    "\xEF\xBB\xBF"
 #define MAX_PEOPLE  (STUDENT_MAX + 100)   /* current students + people only seen in old logs */
 #define NO_TIME     (-1)
+#define MAX_VISITS  8                     /* visits listed per day in the export (all are counted) */
 
 typedef struct {
     int16_t first_in;     /* minutes since midnight */
@@ -24,6 +25,10 @@ typedef struct {
     int16_t minutes;      /* time inside that day */
     uint8_t present;
     uint8_t missing_exit;
+    uint8_t entries;
+    uint8_t exits;
+    uint8_t nvisits;      /* visits stored below (<= MAX_VISITS) */
+    int16_t vin[MAX_VISITS], vout[MAX_VISITS];   /* vout NO_TIME = still open / exit missing */
 } day_t;
 
 typedef struct {
@@ -100,9 +105,16 @@ static void parse_day(int year, int month, int d, bool is_today)
         int t = hh * 60 + mm;
 
         if (strcmp(dir, "IN") == 0) {
-            if (dy->open_in == NO_TIME) dy->open_in = t;
+            if (dy->open_in != NO_TIME) continue;   /* IN while already inside (not written by attendance.c) */
+            dy->open_in = t;
             if (dy->first_in == NO_TIME) dy->first_in = t;
             dy->present = 1;
+            if (dy->entries < 255) dy->entries++;
+            if (dy->nvisits < MAX_VISITS) {
+                dy->vin[dy->nvisits] = t;
+                dy->vout[dy->nvisits] = NO_TIME;
+                dy->nvisits++;
+            }
         } else if (strcmp(dir, "DAY_END") == 0) {
             /* automatic end-of-day close: keep the visit open so it counts as
              * "exit not recorded" and adds no hours */
@@ -110,6 +122,8 @@ static void parse_day(int year, int month, int d, bool is_today)
             dy->minutes += t - dy->open_in;
             dy->open_in = NO_TIME;
             dy->last_out = t;
+            if (dy->exits < 255) dy->exits++;
+            if (dy->entries <= MAX_VISITS) dy->vout[dy->entries - 1] = t;   /* closes the stored visit */
         }
     }
     fclose(f);
@@ -162,6 +176,8 @@ int report_build(int year, int month, report_row_t *rows, int max)
             day_t *dy = &p->day[d];
             if (!dy->present) continue;
             r->days_present++;
+            r->entries += dy->entries;
+            r->exits += dy->exits;
             r->missing_exits += dy->missing_exit;
             r->total_min += dy->minutes;
             arrive_sum += dy->first_in;
@@ -194,7 +210,7 @@ esp_err_t report_export(int year, int month, char *out_path, size_t out_len)
         return ESP_FAIL;
     }
 
-    fputs(UTF8_BOM "מספר,שם,ימי נוכחות,סה״כ שעות,ממוצע הגעה,ימים ללא יציאה", f);
+    fputs(UTF8_BOM "מספר,שם,ימי נוכחות,כניסות,יציאות,סה״כ שעות,ממוצע הגעה,ימים ללא יציאה", f);
     for (int d = 1; d <= s_days_in_month; d++) fprintf(f, ",%d", d);
     fputc('\n', f);
 
@@ -203,7 +219,8 @@ esp_err_t report_export(int year, int month, char *out_path, size_t out_len)
         const report_row_t *r = &s_rows[i];
         fmt_hm(a, sizeof(a), r->total_min);
         fmt_hm(b, sizeof(b), r->avg_arrival_min);
-        fprintf(f, "%u,%s,%d,%s,%s,%d", r->id, r->name, r->days_present, a, b, r->missing_exits);
+        fprintf(f, "%u,%s,%d,%d,%d,%s,%s,%d", r->id, r->name, r->days_present, r->entries, r->exits,
+                a, b, r->missing_exits);
 
         const person_t *p = NULL;
         for (int k = 0; k < s_count && !p; k++) if (s_people[k].id == r->id) p = &s_people[k];
@@ -213,10 +230,17 @@ esp_err_t report_export(int year, int month, char *out_path, size_t out_len)
                 fputc(',', f);
                 continue;
             }
-            fmt_hm(a, sizeof(a), dy->first_in);
-            if (dy->open_in != NO_TIME) strcpy(b, "?");
-            else fmt_hm(b, sizeof(b), dy->last_out);
-            fprintf(f, ",%s-%s", a, b);
+            /* every visit "in-out", separated by " | ", then the day's total */
+            fputc(',', f);
+            for (int v = 0; v < dy->nvisits; v++) {
+                fmt_hm(a, sizeof(a), dy->vin[v]);
+                if (dy->vout[v] == NO_TIME) strcpy(b, "?");
+                else fmt_hm(b, sizeof(b), dy->vout[v]);
+                fprintf(f, "%s%s-%s", v ? " | " : "", a, b);
+            }
+            if (dy->entries > dy->nvisits) fputs(" | ...", f);
+            fmt_hm(a, sizeof(a), dy->minutes);
+            fprintf(f, " (%s)", a);
         }
         fputc('\n', f);
     }

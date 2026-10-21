@@ -14,6 +14,7 @@
 static const char *TAG = "ATTENDANCE";
 
 #define LOG_DIR   "/sd/logs"
+#define REENTRY_GAP_S  60   /* minimum time from an exit to the next entry */
 #define UTF8_BOM  "\xEF\xBB\xBF"
 
 EXT_RAM_BSS_ATTR static att_record_t s_rec[STUDENT_MAX];
@@ -52,18 +53,34 @@ static att_record_t *find_or_add(uint16_t id, const char *name)
     return r;
 }
 
-static void apply(att_record_t *r, att_dir_t dir, int sec)
+/* Event kinds: an exit counts (OUT / AUTO_OUT), DAY_END only closes the visit
+ * ("exit not recorded": no exit counted, no time added) */
+typedef enum { EV_IN, EV_OUT, EV_DAY_END } ev_t;
+
+static void apply(att_record_t *r, ev_t ev, int sec)
 {
-    if (dir == ATT_IN) {
+    if (ev == EV_IN) {
         if (r->first_in == ATT_NO_TIME) r->first_in = sec;
         r->last_in = sec;
         r->present = true;
+        r->entries++;
     } else {
+        if (ev == EV_OUT && r->present) {
+            r->exits++;
+            if (sec >= r->last_in) r->inside_sec += sec - r->last_in;
+        }
         r->last_out = sec;
         r->present = false;
     }
     r->last_scan = sec;
     r->scans++;
+}
+
+static ev_t ev_from_str(const char *dir)
+{
+    if (strcmp(dir, "IN") == 0) return EV_IN;
+    if (strcmp(dir, "DAY_END") == 0) return EV_DAY_END;
+    return EV_OUT;   /* OUT, AUTO_OUT */
 }
 
 static bool append_log(int sec, uint16_t id, const char *dir, const char *name)
@@ -122,7 +139,7 @@ static void load_day_locked(const struct tm *t)
         }
         att_record_t *r = find_or_add(id, p + consumed);
         if (!r) break;
-        apply(r, strcmp(dir, "IN") == 0 ? ATT_IN : ATT_OUT, hh * 3600 + mm * 60 + ss);
+        apply(r, ev_from_str(dir), hh * 3600 + mm * 60 + ss);
         ESP_LOGI(TAG, "  replay %02d:%02d:%02d #%u %-8s %s", hh, mm, ss, id, dir, p + consumed);
         n++;
     }
@@ -143,7 +160,7 @@ static void close_day_locked(void)
     int n = 0;
     for (int i = 0; i < s_rec_count; i++) {
         if (!s_rec[i].present) continue;
-        apply(&s_rec[i], ATT_OUT, DAY_END_SEC);
+        apply(&s_rec[i], EV_DAY_END, DAY_END_SEC);
         append_log(DAY_END_SEC, s_rec[i].id, "DAY_END", s_rec[i].name);
         n++;
     }
@@ -205,7 +222,11 @@ att_result_t attendance_register(const student_t *s)
         return res;
     }
 
+    /* The in/out gap protects a recorded entry (walking past the camera must not check
+     * the student out). After an exit, re-entry only needs a short pause so someone
+     * still standing at the door is not checked straight back in. */
     int gap = settings_get()->min_scan_gap_s;
+    if (!r->present && gap > REENTRY_GAP_S) gap = REENTRY_GAP_S;
     res.prev_sec = r->last_scan;
     if (r->last_scan != ATT_NO_TIME && sec - r->last_scan >= 0 && sec - r->last_scan < gap) {
         res.repeat = true;
@@ -219,7 +240,7 @@ att_result_t attendance_register(const student_t *s)
     }
 
     res.dir = r->present ? ATT_OUT : ATT_IN;
-    apply(r, res.dir, sec);
+    apply(r, res.dir == ATT_IN ? EV_IN : EV_OUT, sec);
     res.log_ok = append_log(sec, s->id, res.dir == ATT_IN ? "IN" : "OUT", s->name);
     UNLOCK();
 
@@ -262,13 +283,20 @@ int attendance_mark_all_out(void)
     LOCK();
     for (int i = 0; i < s_rec_count; i++) {
         if (!s_rec[i].present) continue;
-        apply(&s_rec[i], ATT_OUT, sec);
+        apply(&s_rec[i], EV_OUT, sec);
         append_log(sec, s_rec[i].id, "AUTO_OUT", s_rec[i].name);
         n++;
     }
     UNLOCK();
     ESP_LOGI(TAG, "Marked %d students out", n);
     return n;
+}
+
+int attendance_inside_sec(const att_record_t *r, int now_sec)
+{
+    int t = r->inside_sec;
+    if (r->present && now_sec >= r->last_in) t += now_sec - r->last_in;
+    return t;
 }
 
 void attendance_fmt_time(int sec, char out[6])

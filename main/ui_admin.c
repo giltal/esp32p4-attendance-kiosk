@@ -535,10 +535,13 @@ static void build_students_tab(lv_obj_t *page)
 /* The table is laid out LTR with the columns in reverse order (it still reads
  * right-to-left on screen): in an RTL table LVGL's BiDi turns "09:24" into
  * "24:09", because it treats ':' as a neutral separator between two numbers. */
-#define COL_NAME   3
-#define COL_IN     2
-#define COL_OUT    1
-#define COL_STATE  0
+#define COL_NAME     6
+#define COL_IN       5
+#define COL_OUT      4
+#define COL_ENTRIES  3
+#define COL_EXITS    2
+#define COL_TOTAL    1
+#define COL_STATE    0
 
 static void report_refresh(void)
 {
@@ -547,18 +550,27 @@ static void report_refresh(void)
     int total = student_db_count();
     int present = 0;
 
+    struct tm now = {0};
+    bsp_rtc_get_time(&now);
+    int now_sec = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec;
+
     lv_table_set_row_count(rep_table, 1);
     int row = 1;
-    char t1[6], t2[6];
+    char t1[6], t2[6], t3[16];
 
     for (int i = 0; i < n; i++) {
         att_record_t *r = &s_records[i];
         if (r->present) present++;
         attendance_fmt_time(r->first_in, t1);
-        attendance_fmt_time(r->present ? ATT_NO_TIME : r->last_out, t2);
+        attendance_fmt_time(r->last_out, t2);
+        int inside_min = attendance_inside_sec(r, now_sec) / 60;
+        snprintf(t3, sizeof(t3), "%02d:%02d", inside_min / 60, inside_min % 60);
         lv_table_set_cell_value(rep_table, row, COL_NAME, r->name);
         lv_table_set_cell_value(rep_table, row, COL_IN, t1);
         lv_table_set_cell_value(rep_table, row, COL_OUT, t2);
+        lv_table_set_cell_value_fmt(rep_table, row, COL_ENTRIES, "%d", r->entries);
+        lv_table_set_cell_value_fmt(rep_table, row, COL_EXITS, "%d", r->exits);
+        lv_table_set_cell_value(rep_table, row, COL_TOTAL, t3);
         lv_table_set_cell_value(rep_table, row, COL_STATE, r->present ? "בפנים" : "יצא");
         row++;
     }
@@ -573,6 +585,9 @@ static void report_refresh(void)
         lv_table_set_cell_value(rep_table, row, COL_NAME, s.name);
         lv_table_set_cell_value(rep_table, row, COL_IN, "--:--");
         lv_table_set_cell_value(rep_table, row, COL_OUT, "--:--");
+        lv_table_set_cell_value(rep_table, row, COL_ENTRIES, "0");
+        lv_table_set_cell_value(rep_table, row, COL_EXITS, "0");
+        lv_table_set_cell_value(rep_table, row, COL_TOTAL, "--:--");
         lv_table_set_cell_value(rep_table, row, COL_STATE, "לא הגיע");
         row++;
     }
@@ -619,11 +634,14 @@ static void build_report_tab(lv_obj_t *page)
     ui_align(rep_table, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_style_base_dir(rep_table, LV_BASE_DIR_LTR, 0);
     lv_obj_set_style_text_align(rep_table, LV_TEXT_ALIGN_RIGHT, LV_PART_ITEMS);
-    lv_table_set_column_count(rep_table, 4);
-    lv_table_set_column_width(rep_table, COL_NAME, 420);
-    lv_table_set_column_width(rep_table, COL_IN, 170);
-    lv_table_set_column_width(rep_table, COL_OUT, 170);
-    lv_table_set_column_width(rep_table, COL_STATE, 180);
+    lv_table_set_column_count(rep_table, 7);
+    lv_table_set_column_width(rep_table, COL_NAME, 250);
+    lv_table_set_column_width(rep_table, COL_IN, 130);
+    lv_table_set_column_width(rep_table, COL_OUT, 130);
+    lv_table_set_column_width(rep_table, COL_ENTRIES, 95);
+    lv_table_set_column_width(rep_table, COL_EXITS, 95);
+    lv_table_set_column_width(rep_table, COL_TOTAL, 110);
+    lv_table_set_column_width(rep_table, COL_STATE, 130);
     lv_obj_set_style_text_font(rep_table, &g_font22, LV_PART_ITEMS);
     lv_obj_set_style_text_color(rep_table, CLR_TEXT, LV_PART_ITEMS);
     lv_obj_set_style_bg_color(rep_table, CLR_PANEL, LV_PART_ITEMS);
@@ -633,15 +651,20 @@ static void build_report_tab(lv_obj_t *page)
     lv_obj_set_style_border_width(rep_table, 0, 0);
     lv_table_set_cell_value(rep_table, 0, COL_NAME, "שם");
     lv_table_set_cell_value(rep_table, 0, COL_IN, "כניסה ראשונה");
-    lv_table_set_cell_value(rep_table, 0, COL_OUT, "יציאה");
+    lv_table_set_cell_value(rep_table, 0, COL_OUT, "יציאה אחרונה");
+    lv_table_set_cell_value(rep_table, 0, COL_ENTRIES, "כניסות");
+    lv_table_set_cell_value(rep_table, 0, COL_EXITS, "יציאות");
+    lv_table_set_cell_value(rep_table, 0, COL_TOTAL, "זמן נוכחות");
     lv_table_set_cell_value(rep_table, 0, COL_STATE, "מצב");
 }
 
 /* ══ Monthly report dialog ════════════════════════════════════════════════ */
 
 /* LTR table, columns in reverse order (times must not be BiDi-reordered) */
-#define MCOL_NAME     4
-#define MCOL_DAYS     3
+#define MCOL_NAME     6
+#define MCOL_DAYS     5
+#define MCOL_ENTRIES  4
+#define MCOL_EXITS    3
 #define MCOL_HOURS    2
 #define MCOL_ARRIVE   1
 #define MCOL_MISSING  0
@@ -665,6 +688,8 @@ static void monthly_refresh(void)
         if (r->days_present) active++;
         lv_table_set_cell_value(mr_table, i + 1, MCOL_NAME, r->name);
         lv_table_set_cell_value_fmt(mr_table, i + 1, MCOL_DAYS, "%d", r->days_present);
+        lv_table_set_cell_value_fmt(mr_table, i + 1, MCOL_ENTRIES, "%d", r->entries);
+        lv_table_set_cell_value_fmt(mr_table, i + 1, MCOL_EXITS, "%d", r->exits);
         snprintf(t, sizeof(t), "%02d:%02d", r->total_min / 60, r->total_min % 60);
         lv_table_set_cell_value(mr_table, i + 1, MCOL_HOURS, r->days_present ? t : "-");
         if (r->avg_arrival_min >= 0) {
@@ -729,12 +754,14 @@ static void monthly_open(void)
     ui_align(mr_table, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_style_base_dir(mr_table, LV_BASE_DIR_LTR, 0);
     lv_obj_set_style_text_align(mr_table, LV_TEXT_ALIGN_RIGHT, LV_PART_ITEMS);
-    lv_table_set_column_count(mr_table, 5);
-    lv_table_set_column_width(mr_table, MCOL_NAME, 330);
-    lv_table_set_column_width(mr_table, MCOL_DAYS, 140);
-    lv_table_set_column_width(mr_table, MCOL_HOURS, 150);
-    lv_table_set_column_width(mr_table, MCOL_ARRIVE, 150);
-    lv_table_set_column_width(mr_table, MCOL_MISSING, 160);
+    lv_table_set_column_count(mr_table, 7);
+    lv_table_set_column_width(mr_table, MCOL_NAME, 250);
+    lv_table_set_column_width(mr_table, MCOL_DAYS, 125);
+    lv_table_set_column_width(mr_table, MCOL_ENTRIES, 95);
+    lv_table_set_column_width(mr_table, MCOL_EXITS, 95);
+    lv_table_set_column_width(mr_table, MCOL_HOURS, 120);
+    lv_table_set_column_width(mr_table, MCOL_ARRIVE, 135);
+    lv_table_set_column_width(mr_table, MCOL_MISSING, 120);
     lv_obj_set_style_text_font(mr_table, &g_font22, LV_PART_ITEMS);
     lv_obj_set_style_text_color(mr_table, CLR_TEXT, LV_PART_ITEMS);
     lv_obj_set_style_bg_color(mr_table, CLR_PANEL, LV_PART_ITEMS);
@@ -744,6 +771,8 @@ static void monthly_open(void)
     lv_obj_set_style_border_width(mr_table, 0, 0);
     lv_table_set_cell_value(mr_table, 0, MCOL_NAME, "שם");
     lv_table_set_cell_value(mr_table, 0, MCOL_DAYS, "ימי נוכחות");
+    lv_table_set_cell_value(mr_table, 0, MCOL_ENTRIES, "כניסות");
+    lv_table_set_cell_value(mr_table, 0, MCOL_EXITS, "יציאות");
     lv_table_set_cell_value(mr_table, 0, MCOL_HOURS, "סה\"כ שעות");
     lv_table_set_cell_value(mr_table, 0, MCOL_ARRIVE, "הגעה ממוצעת");
     lv_table_set_cell_value(mr_table, 0, MCOL_MISSING, "ללא יציאה");

@@ -16,9 +16,11 @@ sensor** (UART). The UI is in Hebrew (right-to-left).
   50 templates): 3-capture enrollment, 2 fingers per student, identification, duplicate check.
   Auto-detects baud rate and swapped TX/RX; a boot-time protocol scan (GROW / FPM383 / ID809)
   helps identify unknown modules.
-- **Attendance logic** — automatic IN/OUT toggle with a configurable minimum time between entry and
-  exit (default 30 min), automatic check-out at end of day, state survives reboots (today's log is
-  replayed at boot).
+- **Attendance logic** — automatic IN/OUT toggle, any number of visits per day, a configurable minimum
+  time between entry and exit (default 30 min; re-entry after an exit needs only 1 min), automatic
+  check-out at end of day, state survives reboots (today's log is replayed at boot).
+- **Presence per student** — entries, exits and total time inside, today (admin screen) and per month
+  (report + export; each day's visits are listed, e.g. `08:05-10:00 | 11:00-14:30 (05:25)`).
 - **Records on the SD card** — `students.csv`, daily logs `logs/YYYY-MM-DD.csv`, monthly reports
   `reports/YYYY-MM.csv` (UTF-8 with BOM, open directly in Excel).
 - **Admin screen (PIN protected)** — students (add, rename, enroll fingers / face, delete), today's

@@ -4,10 +4,12 @@
  * Monthly attendance report, computed from the daily logs
  * /sd/logs/YYYY-MM-DD.csv (written by attendance.c).
  *
- * Per student: days present, total time inside (sum of IN -> OUT/AUTO_OUT
- * pairs), average first arrival, days with no exit recorded (today excluded).
+ * Per student: days present, number of entries and exits, total time inside
+ * (sum of all IN -> OUT/AUTO_OUT visits, several per day allowed), average
+ * first arrival, days with no exit recorded (today excluded).
  * Export: /sd/reports/YYYY-MM.csv (UTF-8 with BOM) — summary columns plus
- * one column per day ("08:05-14:30", "08:05-?" when the exit is missing).
+ * one column per day listing that day's visits and their total, e.g.
+ * "08:05-10:00 | 11:00-14:30 (05:25)"; "?" marks a missing exit.
  *
  * Not thread-safe: call from one task (the LVGL task).
  */
@@ -20,6 +22,8 @@ typedef struct {
     uint16_t id;
     char     name[STUDENT_NAME_MAX];
     int      days_present;
+    int      entries;          /* IN events, whole month */
+    int      exits;            /* OUT / AUTO_OUT events, whole month */
     int      missing_exits;
     int      total_min;        /* minutes inside, whole month */
     int      avg_arrival_min;  /* minutes since midnight, -1 if never present */

@@ -333,7 +333,7 @@ void ui_main_handle_event(const fp_event_t *e)
             if (e->att.dir == ATT_IN)
                 snprintf(sub, sizeof(sub), "כניסה כבר נרשמה ב-%s\nיציאה אפשרית מ-%s", prev, next);
             else
-                snprintf(sub, sizeof(sub), "יציאה כבר נרשמה ב-%s", prev);
+                snprintf(sub, sizeof(sub), "יציאה כבר נרשמה ב-%s\nכניסה חוזרת אפשרית מ-%s", prev, next);
             show_result(CLR_INFO, e->student.name, sub, e->att.time_sec);
         } else {
             char prev[8];
